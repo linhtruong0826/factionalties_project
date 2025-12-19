@@ -1,0 +1,716 @@
+---
+title: "Factional ties"
+author: "Linh Truong"
+date: "2025-11-25"
+output: html_document
+---
+This R markdown reflects the logic of the paper's methodology, proceeds as below:
+***1 - Coding factional ties***
+Factional ties are operationalized using the “three commons” approach, which captures shared biographical backgrounds between officials. Specifically, ties are coded based on:
+	1.Hometown ties: whether the official and the faction leader originate from the same province.
+	2.Work-unit ties: whether the official and the faction leader served in the same work unit for at least one overlapping year.
+	3.Educational ties: whether the official and the faction leader attended the same higher-education institution.
+
+Post-reform career trajectories are classified by comparing an official’s position before and after the reform:
+	•	Promoted if the post-reform position is hierarchically higher than the pre-reform position;
+	•	Stayed if the position remains unchanged;
+	•	Demoted if the post-reform position is lower than the pre-reform position.
+
+Local embeddedness captures whether an official has prior experience governing in the same province after the reform:
+	•	Local = 1 if the official previously worked in the same province;
+	•	Local = 0 otherwise.
+
+***2 - Multinominal logit regression and Predicted Possibilities***
+Examines whether factional ties shape post-reform career outcomes using multinomial logit models, with staying in office as the reference category. 
+	•	Table 4 reports the estimated coefficients
+	•	Table 5 presents predicted probabilities derived from the multinomial model
+
+
+***3 - Mapping***
+Finally, spatial visualizations are used to map the geographic distribution of factional ties (Map 1) and post-reform career outcomes (Map 2) across provinces. 
+
+#0 - General setup
+```{r setup}
+setwd("/Users/ngoclinh/Desktop/quantitative/code")
+library(readxl)
+library(stringi)
+library(tidyverse)
+library(here)
+library(writexl)
+library(dplyr)
+library(flextable)
+library(lubridate)
+library(nnet)
+library(broom)
+library(modelsummary)
+library(officer)
+library(tidyr)
+library(stringr)
+library(sf)
+library(ggplot2)
+library(stringi)
+library(rgeoboundaries)
+```
+
+
+#1 - Coding factional ties
+```{r setup, include=FALSE}
+### Setting up the dataset first!
+
+# Function to harmonize provincial names
+clean_province_names <- function(x) {
+  x %>%
+    case_match(
+      "Thành phố Hồ Chí Minh" ~ "Ho Chi Minh",
+      "TPHCM" ~ "Ho Chi Minh",
+      "TP. Hồ Chí Minh" ~ "Ho Chi Minh",
+      "Huế" ~ "Thua Thien Hue",
+      .default = x) %>%
+    stri_trans_general("Latin-ASCII") %>%
+    str_squish()
+}
+
+# Prep list of provincial secretaries
+bio_ps <- readxl::read_xlsx("/Users/ngoclinh/Desktop/quantitative/code/data/bio_202509.xlsx")
+job_ps <- readxl::read_xlsx("/Users/ngoclinh/Desktop/quantitative/code/data/jobs_202509.xlsx")
+
+members_ps <- readxl::read_xlsx("/Users/ngoclinh/Desktop/quantitative/code/data/members_ps_manual_202509.xlsx")
+
+members_ps_analyze <- members_ps %>%
+  mutate(province_en = province_prereform %>%
+           clean_province_names(),
+         province_new = province_postreform %>%
+           clean_province_names() ) 
+
+# Merge with bio 
+members_ps_analyze <- members_ps_analyze %>%
+  left_join(bio_ps %>% select(-ad_source))
+
+# Code for trajectory based on previous and current position
+members_ps_analyze <- members_ps_analyze %>%
+  mutate(ps_trajectory = case_when(
+    !str_detect(position_prereform, "Bí thư Tỉnh") & str_detect(position_postreform, "Bí thư Tỉnh") ~ "promotion",
+    str_detect(position_prereform, "Bí thư Tỉnh") & str_detect(position_postreform, "Bí thư Tỉnh") ~ "neutral",
+    str_detect(position_prereform, "Bí thư Tỉnh") & str_detect(position_postreform, "Phó Bí thư|Chủ tịch HĐND|None") ~ "demotion",
+    str_detect(position_prereform, "Bí thư Tỉnh") ~ "demotion_soft",
+    TRUE ~ "other"))
+
+# Code for local official 
+members_ps_analyze <- members_ps_analyze %>%
+  mutate(bprovince = bprovince %>%
+           clean_province_names(),
+         local = as.numeric(bprovince == province_en))
+
+### Code for ties with To Lam
+# To be replaced later by better rules
+members_ps_analyze <- members_ps_analyze %>%
+  mutate(
+    tie_tl_bp = case_when(
+      name %in% c("Vũ Hồng Văn", "Trần Lưu Quang", "Nguyễn Văn Quảng", "Nguyễn Duy Ngọc", "Lê Hồng Quang", "Nguyễn Văn Nên", "Nguyễn Long Hải") ~ 1,
+      name %in% c("Quản Minh Cường") ~ 3,
+      TRUE ~ 0),
+  
+    tie_tl_edu = case_when( # Hoc vien An Ninh Nhan Dan
+      name %in% c("Giàng Páo Mỷ", "Nguyễn Duy Ngọc") ~ 1,
+      TRUE ~ 0),
+   
+    tie_tl_wp = case_when(
+      name %in% c("Vũ Hồng Văn") ~ 1, # work in Bo Cong An concurrent with To Lam,
+      TRUE ~ 0),
+    
+    tie_tl_family = case_when(
+      name %in% c("Vũ Hồng Văn") ~ 1, # Rumored. Brother of 1st wife,
+      TRUE ~ 0),
+    
+    tie_tl_ins = case_when(
+      branch == "Public Security" ~ 1,
+      TRUE ~ 0),
+    
+ #Ties to To Lam (tl)
+    tie = as.numeric((tie_tl_bp + tie_tl_wp + tie_tl_family) > 0),
+ #Military
+    tie_military_personal = as.numeric(branch == "Military") %>%
+      replace_na(0),
+ #Public Security (Beacause TL used to work in the Ministry of Public Security)
+    tie_pubsec = as.numeric(branch == "Public Security") %>%
+      replace_na(0),
+  )
+
+members_ps_analyze <- members_ps_analyze %>%
+  rename(survival = status_postreform)
+
+#save file for backup
+write_xlsx(
+  members_ps_analyze,
+  "/Users/ngoclinh/Desktop/quantitative/code/data/members_ps_analyze.xlsx"
+)
+
+    
+```
+
+
+#2 - Multinominal logit regression and Predicted Probabilities
+```{r setup, include=FALSE}
+###Preparation
+#Dependent variable = survival
+#IV1 = factional ties to To Lam = tie
+members_ps_analyze <- members_ps_analyze %>%
+  mutate(
+    survival = factor(
+      survival,
+      levels = c("stay", "promoted", "demoted")
+    )
+  )
+#IV2 = local
+members_ps_analyze <- members_ps_analyze %>%
+  mutate(
+    local = if_else(
+      !is.na(province_en) &
+      !is.na(province_new) &
+      province_en == province_new,
+      1L, 0L
+    ) )
+#Control variables:age, gender (M=1, F=0), public security background (tie_pubsec), years of party membership
+
+reform_date <- as.Date("2025-07-01")
+
+members_ps_analyze <- members_ps_analyze %>%
+  mutate(
+    bday   = as.Date(bday),
+    dparty = as.Date(dparty),
+ age = floor(time_length(interval(bday, reform_date), "years")),
+
+ #Gender (Male = 1, Female = 0)
+      male = case_when(
+      gender %in% c("M", "Male", "Nam") ~ 1L,
+      gender %in% c("F", "Female", "Nữ", "Nu") ~ 0L,
+      TRUE ~ NA_integer_
+    ),
+
+    #Years of party membership
+    party_years = floor(time_length(interval(dparty, reform_date), "years"))
+  )
+
+```
+
+
+```{r}
+
+#######Run regressions and making tables
+members_ps_analyze <- members_ps_analyze %>%
+  mutate(
+    survival = factor(survival, levels = c("stay", "promoted", "demoted"))
+  )
+
+# labels
+var_labels <- c(
+  tie = "Factional tie",
+  local = "Local embeddedness",
+  age = "Age",
+  male = "Male",
+  party_years = "Years of party membership",
+  tie_pubsec = "Public Security background"
+)
+
+#Theme
+ft_theme <- function(ft) {
+  ft %>%
+    theme_booktabs() %>%
+    autofit() %>%
+    fontsize(size = 10, part = "all") %>%
+    align(align = "left", part = "all") %>%
+    align(j = 2:ncol(ft$body$dataset), align = "right", part = "body")
+}
+
+######Table 1 — Descriptive statistics
+vars_t1 <- c("tie", "local", "age", "male", "party_years", "tie_pubsec")
+
+t1 <- members_ps_analyze %>%
+  select(all_of(vars_t1)) %>%
+  summarise(across(
+    everything(),
+    list(
+      Mean = ~ mean(.x, na.rm = TRUE),
+      SD   = ~ sd(.x, na.rm = TRUE),
+      Min  = ~ suppressWarnings(min(.x, na.rm = TRUE)),
+      Max  = ~ suppressWarnings(max(.x, na.rm = TRUE)),
+      N    = ~ sum(!is.na(.x))
+    ),
+    .names = "{.col}__{.fn}"
+  )) %>%
+  pivot_longer(everything(), names_to = "stat", values_to = "value") %>%
+  separate(stat, into = c("variable", "stat"), sep = "__") %>%
+  pivot_wider(names_from = stat, values_from = value) %>%
+  mutate(
+    Variable = recode(variable, !!!var_labels, .default = variable)
+  ) %>%
+  select(Variable, Mean, SD, Min, Max, N) %>%
+  mutate(across(c(Mean, SD, Min, Max), ~ round(.x, 2)))
+
+ft1 <- flextable(t1)
+ft1 <- ft_theme(ft1)
+ft1
+
+
+######Table 2 — Distribution of outcome
+t2a <- members_ps_analyze %>%
+  count(survival, name = "Count") %>%
+  mutate(Percent = round(100 * Count / sum(Count), 1))
+
+ft2a <- flextable(t2a) %>% ft_theme()
+ft2a
+
+t2b <- members_ps_analyze %>%
+  mutate(tie_group = if_else(tie == 1, "Tie", "No tie")) %>%
+  count(tie_group, survival, name = "Count") %>%
+  group_by(tie_group) %>%
+  mutate(Percent = round(100 * Count / sum(Count), 1)) %>%
+  ungroup() %>%
+  arrange(tie_group, survival)
+
+ft2b <- flextable(t2b) %>% ft_theme()
+ft2b
+
+
+#######Table 3 — “Three commons” tie construction (hometown / work / education)
+tie_vars <- c("tie_tl_bp", "tie_tl_wp", "tie_tl_edu", "tie")
+
+missing_ties <- setdiff(tie_vars, names(members_ps_analyze))
+if (length(missing_ties) > 0) {
+  message("Table 3 not generated. Missing tie variables: ", paste(missing_ties, collapse = ", "))
+} else {
+  t3 <- tibble(
+    `Type of tie` = c("Hometown tie", "Work-unit tie", "Education tie", "Any tie"),
+    `Definition`  = c(
+      "Same province",
+      "Work-unit overlap of at least 1 year",
+      "Same educational institution",
+      "At least one of the above"
+    ),
+    `Share of officials (%)` = c(
+      mean(members_ps_analyze$tie_tl_bp, na.rm = TRUE),
+      mean(members_ps_analyze$tie_tl_wp, na.rm = TRUE),
+      mean(members_ps_analyze$tie_tl_edu,  na.rm = TRUE),
+      mean(members_ps_analyze$tie,  na.rm = TRUE)
+    ) * 100
+  ) %>%
+    mutate(`Share of officials (%)` = round(`Share of officials (%)`, 1))
+
+  ft3 <- flextable(t3) %>% ft_theme()
+  ft3
+}
+
+######Table 4 - Multinomial logit regression
+# Variables
+vars_m4 <- c("survival", "tie", "local", "age", "male", "party_years", "tie_pubsec")
+
+# Estimation sample
+df_m4 <- members_ps_analyze %>%
+  select(all_of(vars_m4)) %>%
+  filter(complete.cases(.))
+
+# Drop zero-variance predictors
+var_counts <- sapply(df_m4 %>% select(-survival), function(x) length(unique(x)))
+drop_vars <- names(var_counts[var_counts < 2])
+
+if (length(drop_vars) > 0) {
+  message("Dropping predictors with no variation in estimation sample: ",
+          paste(drop_vars, collapse = ", "))
+}
+
+keep_predictors <- setdiff(names(df_m4), c("survival", drop_vars))
+f_m4 <- as.formula(paste("survival ~", paste(keep_predictors, collapse = " + ")))
+
+m4 <- multinom(
+  f_m4,
+  data = df_m4,
+  trace = FALSE,
+  Hess = TRUE
+)
+# Robust (sandwich) vcov for nnet::multinom (HC0)
+# Score for class k (non-baseline): x_i * (1[y_i=k] - p_ik)
+# vcov_rob = H^{-1} (sum_i s_i s_i') H^{-1}
+vcovHC_multinom <- function(model) {
+  mf <- model.frame(model)
+  y  <- model.response(mf)                  
+  X  <- model.matrix(delete.response(terms(model)), mf)
+  P  <- fitted(model)                       
+  lev <- colnames(P)
+
+  # baseline is stay
+  base <- lev[1]
+  nonbase <- lev[-1]
+
+  n <- nrow(X)
+  p <- ncol(X)
+  K1 <- length(nonbase)                    
+  q <- K1 * p                              
+
+  # score matrix S (n x q)
+  S <- matrix(0, nrow = n, ncol = q)
+
+  for (k in seq_along(nonbase)) {
+    cls <- nonbase[k]
+    yik <- as.numeric(y == cls)            
+    pik <- P[, cls]                        
+    # score block for this class: X * (yik - pik)
+    block <- X * as.numeric(yik - pik)
+    cols <- ((k - 1) * p + 1):(k * p)
+    S[, cols] <- block
+  }
+
+  # Bread: inverse Hessian
+  H <- model$Hessian
+  bread <- solve(H)
+
+  # Meat: sum_i s_i s_i'
+  meat <- crossprod(S)
+
+  bread %*% meat %*% bread
+}
+
+V_rob <- vcovHC_multinom(m4)
+
+# Extract coefficients in same stacking order as vcov
+coef_mat <- coef(m4)                       
+if (is.vector(coef_mat)) coef_mat <- rbind(coef_mat) 
+
+# Robust SEs
+se_rob <- sqrt(diag(V_rob))
+
+p <- ncol(coef_mat)
+outcomes <- rownames(coef_mat)
+terms_x  <- colnames(coef_mat)
+
+t4_long <- tibble()
+idx <- 1
+
+for (k in seq_along(outcomes)) {
+  for (j in seq_along(terms_x)) {
+    t4_long <- bind_rows(
+      t4_long,
+      tibble(
+        y.level = outcomes[k],
+        term = terms_x[j],
+        estimate = as.numeric(coef_mat[k, j]),
+        std.error = se_rob[idx]
+      )
+    )
+    idx <- idx + 1
+  }
+}
+
+# Format
+t4 <- t4_long %>%
+  mutate(
+    outcome = dplyr::case_when(
+      y.level == "promoted" ~ "Promoted vs Stay",
+      y.level == "demoted"  ~ "Demoted vs Stay",
+      TRUE ~ paste0(y.level, " vs Stay")
+    ),
+    term = recode(term, !!!var_labels, .default = term),
+    cell = sprintf("%.3f (%.3f)", estimate, std.error)
+  ) %>%
+  filter(term != "(Intercept)") %>%
+  select(outcome, term, cell) %>%
+  pivot_wider(names_from = outcome, values_from = cell) %>%
+  rename(Variable = term)
+
+n4 <- nrow(df_m4)
+t4 <- bind_rows(
+  t4,
+  tibble(
+    Variable = "N",
+    `Promoted vs Stay` = as.character(n4),
+    `Demoted vs Stay`  = as.character(n4)
+  )
+)
+
+# Flextable
+ft4 <- flextable(t4) %>%
+  set_header_labels(
+    Variable = "",
+    `Promoted vs Stay` = "Promoted (vs Stay)",
+    `Demoted vs Stay`  = "Demoted (vs Stay)"
+  ) %>%
+  align(j = 1, align = "left", part = "all") %>%
+  align(j = 2:3, align = "center", part = "all") %>%
+  autofit()
+
+ft4 <- ft_theme(ft4)
+ft4
+
+####### Table 5 — Predicted probabilities
+required <- c("tie_tl_bp", "tie_tl_wp", "tie_tl_edu")
+missing_req <- setdiff(required, names(members_ps_analyze))
+
+if (length(missing_req) > 0) {
+  message("Table 5 not generated. Missing: ", paste(missing_req, collapse = ", "))
+} else {
+
+  m5 <- multinom(
+    survival ~ tie_tl_bp + tie_tl_wp + tie_tl_edu + local + age + male + party_years + tie_pubsec,
+    data = members_ps_analyze,
+    na.action = na.omit,
+    trace = FALSE,
+    Hess = TRUE
+  )
+
+  # Scenario grid
+  df_m5 <- model.frame(m5) 
+  nd <- tidyr::expand_grid(
+    tie_tl_bp  = c(0, 1),
+    tie_tl_wp  = c(0, 1),
+    tie_tl_edu = c(0, 1),
+    local      = c(0, 1),
+    age        = median(df_m5$age, na.rm = TRUE),
+    male       = 1,
+    party_years = median(df_m5$party_years, na.rm = TRUE),
+    tie_pubsec  = 0
+  )
+
+  # Predicted probabilities. Interesting: local and factional ties might be a stronger predictor of promotion, theoretically works in case of VN
+  pp <- predict(m5, newdata = nd, type = "probs") %>% as.data.frame()
+
+  t5 <- bind_cols(nd, pp) %>%
+    mutate(
+      local = factor(local, labels = c("Non-local", "Local")),
+      tie_tl_bp  = factor(tie_tl_bp,  labels = c("No", "Yes")),
+      tie_tl_wp  = factor(tie_tl_wp,  labels = c("No", "Yes")),
+      tie_tl_edu = factor(tie_tl_edu, labels = c("No", "Yes"))
+    ) %>%
+    transmute(
+      `Hometown tie` = tie_tl_bp,
+      `Work-unit tie` = tie_tl_wp,
+      `Education tie` = tie_tl_edu,
+      `Local embeddedness` = local,
+      Stay = stay,
+      Promoted = promoted,
+      Demoted = demoted
+    ) %>%
+    mutate(across(c(Stay, Promoted, Demoted), ~ round(.x, 3)))
+
+  ft5 <- flextable(t5) %>%
+    align(j = 1:4, align = "left", part = "all") %>%
+    align(j = 5:7, align = "center", part = "all") %>%
+    autofit()
+
+  ft5
+}
+
+######Export tables
+doc <- read_docx()
+
+doc <- doc %>%
+  body_add_par("Table 1. Descriptive Statistics", style = "heading 2") %>%
+  body_add_flextable(ft1) %>%
+  body_add_par("", style = "Normal")
+
+doc <- doc %>%
+  body_add_par("Table 2. Outcome Distribution", style = "heading 2") %>%
+  body_add_flextable(ft2a) %>%
+  body_add_par("", style = "Normal") %>%
+  body_add_flextable(ft2b) %>%
+  body_add_par("", style = "Normal")
+
+
+doc <- doc %>%
+    body_add_par("Table 3. Three-commons Ties Share", style = "heading 2") %>%
+    body_add_flextable(ft3) %>%
+    body_add_par("", style = "Normal")
+
+doc <- doc %>%
+  body_add_par("Table 4. Multinomial Logit Regression Results", style = "heading 2") %>%
+  body_add_flextable(ft4) %>%
+  body_add_par("", style = "Normal")
+
+doc <- doc %>%
+    body_add_par("Table 5. Predicted Probabilities of Post-Reform Career Outcomes", style = "heading 2") %>%
+    body_add_flextable(ft5) %>%
+    body_add_par("", style = "Normal")
+
+print(doc, target = "tables_factional_ties.docx")
+
+out_path <- "/Desktop/quantitative/code/tables_factional_ties.docx"
+cat("Saved to:", out_path)
+
+```
+
+#3 - Mapping
+```{r}
+
+#Getting the map
+vn1 <- gb_adm1(country = "Viet Nam") %>% 
+  st_as_sf() %>%
+  mutate(province_en = clean_province_names(shapeName))
+
+name_col <- dplyr::case_when(
+  "shapeName" %in% names(vn1) ~ "shapeName",
+  "name"      %in% names(vn1) ~ "name",
+  TRUE ~ names(vn1)[1]
+)
+
+vn1 <- vn1 %>%
+  mutate(province_en = clean_province_names(.data[[name_col]]))
+
+crosswalk <- members_ps_analyze %>%
+  distinct(pre = province_en, post = province_new) %>%
+  filter(!is.na(pre), !is.na(post))
+
+
+###Set up provincial level
+sf::sf_use_s2(FALSE)
+
+vn_post <- vn1 %>%
+  st_make_valid() %>%
+  left_join(crosswalk, by = c("province_en" = "pre")) %>%
+  mutate(post = if_else(is.na(post), province_en, post)) %>%
+  group_by(post) %>%
+  summarise(geometry = st_union(st_make_valid(geometry)), .groups = "drop") %>%
+  st_make_valid() %>%
+  rename(province_post = post) %>%
+  mutate(province_post = clean_province_names(province_post))
+
+
+####Map 1 - Factional presence - only shows the presence of factional ties (Yes or No)
+#Province-level binary: any tie present?
+prov_tie_bin <- members_ps_analyze %>%
+  mutate(province_post = clean_province_names(province_new)) %>%
+  filter(!is.na(province_post)) %>%
+  group_by(province_post) %>%
+  summarise(
+    any_tie = as.integer(any(tie == 1, na.rm = TRUE)),
+    n = n(),
+    .groups = "drop"
+  )
+
+# Join to post-reform map
+fig1_df <- vn_post %>%
+  mutate(province_post = clean_province_names(province_post)) %>%
+  left_join(prov_tie_bin, by = "province_post") %>%
+  mutate(
+    any_tie = if_else(is.na(any_tie), 0L, any_tie),
+    tie_label = factor(any_tie, levels = c(0, 1), labels = c("No", "Yes"))
+  )
+
+# Vietnam outer border
+vn_outline <- st_union(vn_post) %>% st_as_sf()
+
+# Plot
+p_fig1 <- ggplot() +
+  geom_sf(
+    data = fig1_df,
+    aes(fill = tie_label),
+    color = "black",      
+    linewidth = 0.25
+  ) +
+  geom_sf(
+    data = vn_outline,
+    fill = NA,
+    color = "black",       
+    linewidth = 1.1
+  ) +
+  scale_fill_manual(
+    values = c("No" = "grey90", "Yes" = "#B2182B"),
+    name = "Factional ties"
+  ) +
+  labs(
+    title = "Presence of Factional Ties across Provinces",
+    subtitle = "Pre-reform map of 63 provinces"
+  ) +
+  theme_void(base_size = 11) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10)
+  )
+
+p_fig1
+
+#### Map 2 — Where promotions occur (Stayed vs Promoted only)
+
+sf::sf_use_s2(FALSE)
+
+prov_points <- vn_post %>%
+  st_make_valid() %>%
+  st_point_on_surface() %>% 
+  mutate(province_post = clean_province_names(province_post)) %>%
+  select(province_post, geometry)
+
+# Keep only Stayed + Promoted 
+points_df2 <- members_ps_analyze %>%
+  mutate(
+    province_post = clean_province_names(province_new),
+    outcome2 = case_when(
+      survival == "promoted" ~ "Promoted",
+      survival == "stay"     ~ "Stayed",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(province_post), !is.na(outcome2)) %>%
+  left_join(prov_points, by = "province_post") %>%
+  st_as_sf() %>%
+  mutate(outcome2 = factor(outcome2, levels = c("Stayed", "Promoted")))
+
+#Plot
+p_fig2 <- ggplot() +
+  # base provinces
+  geom_sf(
+    data = vn_post,
+    fill = "grey95",
+    color = "black",
+    linewidth = 0.25
+  ) +
+  # dots (smaller + clean)
+  geom_sf(
+    data = points_df2,
+    aes(color = outcome2),
+    size = 1.5,       
+    alpha = 0.9
+  ) +
+  # outer border
+  geom_sf(
+    data = vn_outline,
+    fill = NA,
+    color = "black",
+    linewidth = 1.1
+  ) +
+  scale_color_manual(
+    values = c(
+      "Stayed"   = "#F4A6B8",
+      "Promoted" = "#B2182B"
+    ),
+    name = "Post-reform outcome"
+  ) +
+  coord_sf(clip = "on") +  
+  labs(
+    title = "Post-Reform Career Outcomes across Provinces",
+    subtitle = "Pre-reform map of 63 provinces"
+  ) +
+  theme_void(base_size = 11) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10)
+  )
+
+p_fig2
+
+sf::sf_use_s2(TRUE)
+
+### Save the figures
+ggsave(
+  filename = "Figure1_Factional_Ties.png",
+  plot = p_fig1,
+  width = 6.5,
+  height = 9,
+  dpi = 300
+)
+ggsave(
+  filename = "Figure2_Career_Outcomes.png",
+  plot = p_fig2,
+  width = 6.5,
+  height = 9,
+  dpi = 300
+)
+```
